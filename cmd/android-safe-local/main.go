@@ -282,18 +282,50 @@ func main() {
 				progressBar.Show()
 
 				backgroundOp(func() {
+					// Use parallel restore pool with more workers for small files
+					restorePool := backup.NewRestorePool(15, client)
+					restorePool.Start()
+
+					total := len(backupManifest.Entries)
+
+					// Feeder goroutine - send all jobs
+					go func() {
+						for i, entry := range backupManifest.Entries {
+							localFile := filepath.Join(localPath, entry.LocalPath)
+							restorePool.AddJob(backup.RestoreJob{
+								LocalPath:    localFile,
+								OriginalPath: entry.OriginalPath,
+								Index:        i + 1,
+								Total:        total,
+							})
+						}
+						restorePool.Close()
+					}()
+
+					// Collector - process results with optimized logging
 					success := 0
 					failures := 0
-					for _, entry := range backupManifest.Entries {
-						localFile := filepath.Join(localPath, entry.LocalPath)
-						err := client.Push(localFile, entry.OriginalPath)
-						if err != nil {
-							logPrint(fmt.Sprintf("FAIL: %s", filepath.Base(entry.LocalPath)))
+					lastLoggedProgress := 0
+					logInterval := max(1, total/20) // Log every 5% or at least every file if < 20 files
+
+					for res := range restorePool.Results() {
+						if res.Error != nil {
+							// Always log failures
+							logPrint(fmt.Sprintf("✗ FAIL: %s - %s", filepath.Base(res.Job.LocalPath), res.Error.Error()))
 							failures++
 						} else {
 							success++
 						}
-						progressBar.SetValue(progressBar.Value + 1)
+
+						// Update progress bar always (lightweight)
+						processed := success + failures
+						progressBar.SetValue(float64(processed))
+
+						// Log progress periodically to avoid UI slowdown
+						if processed-lastLoggedProgress >= logInterval || processed == total {
+							logPrint(fmt.Sprintf("Progress: %d/%d files restored...", processed, total))
+							lastLoggedProgress = processed
+						}
 					}
 					logPrint(fmt.Sprintf("Restore Complete. Success: %d, Failures: %d", success, failures))
 					progressBar.Hide()
