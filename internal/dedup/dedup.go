@@ -10,25 +10,18 @@ import (
 
 // Registry tracks files that have already been backed up
 type Registry struct {
-	// Map key: "Filename|Size|Timestamp" (Simple unique key)
-	// We use this to skip transfers if the file exists locally with same metadata.
-	// Optimally, we'd check destination path, but if files are moved, this might miss them.
-	// However, the requirement is "deduplication across different folders".
-	// So we map hash -> []paths? Or just check if *any* copy exists?
-	// If we find a match, we might skip downloading.
-
-	// For "Smart Sync" (avoid re-download to same location), Path is part of key.
-	// For "Global Dedup" (avoid download if ANY copy exists), we ignore path.
-
-	// Let's implement Global Dedup based on Size + Name (weak) for now, or Size + Name + Date.
+	// Map key: "Filename|Size" (fast pre-check based on filesystem walk)
 	files map[string]bool
-	mu    sync.RWMutex
+	// hashes: xxHash hex strings from verified transfers (stronger identity)
+	hashes map[string]bool
+	mu     sync.RWMutex
 }
 
 // NewRegistry creates a new registry
 func NewRegistry() *Registry {
 	return &Registry{
-		files: make(map[string]bool),
+		files:  make(map[string]bool),
+		hashes: make(map[string]bool),
 	}
 }
 
@@ -78,4 +71,24 @@ func (r *Registry) Add(file device.File) {
 func makeKey(name string, size int64) string {
 	// "IMG_2024.jpg|1024"
 	return fmt.Sprintf("%s|%d", name, size)
+}
+
+// AddByHash records a verified xxHash so future runs can detect already-transferred files.
+func (r *Registry) AddByHash(hash string) {
+	if hash == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hashes[hash] = true
+}
+
+// LoadHashes seeds the registry with a set of previously stored hashes
+// (typically loaded from the manifest's HashSet).
+func (r *Registry) LoadHashes(hs map[string]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for h := range hs {
+		r.hashes[h] = true
+	}
 }

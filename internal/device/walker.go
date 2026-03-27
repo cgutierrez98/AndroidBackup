@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"fmt"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -21,6 +22,10 @@ type File struct {
 type Walker struct {
 	client *adb.Client
 }
+
+// reLsLine parses a single ls -l line; compiled once at package level for performance.
+// Matches: perms links owner group size date time name
+var reLsLine = regexp.MustCompile(`^([dl-][rwxst-]{9})\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(20\d{2}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s+(.+)$`)
 
 // NewWalker creates a new Walker
 func NewWalker(client *adb.Client) *Walker {
@@ -83,88 +88,61 @@ func parseLsR(output string, rootPath string) ([]File, error) {
 			continue
 		}
 
-		// Parse line
-		// drwxrwx--x 3 root sdcard_rw 4096 2024-01-01 10:00 Camera
-		// parts: [perms, links, user, group, size, date, time, name...]
-		// On some android versions, links might be missing or user/group might be missing?
-		// Toybox ls -l:
-		// perms, links, owner, group, size, date, time, name
+		// Try to parse using regex for typical ls -l format to better handle filenames with spaces.
+		// Example: -rw-rw---- 1 root sdcard_rw 1234 2024-05-20 15:30 image name.jpg
+		if m := reLsLine.FindStringSubmatch(line); m != nil {
+			perms := m[1]
+			sizeStr := m[2]
+			datePart := m[3]
+			timePart := m[4]
+			name := m[5]
 
-		parts := strings.Fields(line)
-
-		// Heuristic parsing.
-		// Perms always start with - or d or l
-		if len(parts) < 6 {
-			// Malformed or unknown line
+			isDir := strings.HasPrefix(perms, "d")
+			size, err := strconv.ParseInt(sizeStr, 10, 64)
+			if err != nil {
+				// skip entries with malformed size
+				continue
+			}
+			if name == "." || name == ".." {
+				continue
+			}
+			fullPath := path.Join(currentDir, name)
+			files = append(files, File{Path: fullPath, Size: size, Timestamp: datePart + " " + timePart, IsDir: isDir})
 			continue
 		}
 
+		// Fallback heuristic (previous behavior), attempt to split and parse date token
+		parts := strings.Fields(line)
+		if len(parts) < 6 {
+			continue
+		}
 		if !strings.HasPrefix(parts[0], "-") && !strings.HasPrefix(parts[0], "d") && !strings.HasPrefix(parts[0], "l") {
 			continue
 		}
-
 		isDir := strings.HasPrefix(parts[0], "d")
-
-		// We need to find where the date/time starts to isolate the name.
-		// Standard format: ... size date time name
-		// Name is the LAST part, but can contain spaces.
-		// Date/Time are usually fields -3 and -2 from the name?
-
-		// Let's assume standard toybox columns.
-		// 0: perms
-		// 1: links? or user?
-		// ...
-		// We can look for the date pattern YYYY-MM-DD
-
 		dateIdx := -1
 		for i, p := range parts {
-			// Check for YYYY-MM-DD
-			if len(p) == 10 && strings.Count(p, "-") == 2 {
-				// verify it looks like a date?
-				// Must start with a digit (e.g. 2024...)
-				if p[0] >= '0' && p[0] <= '9' {
-					dateIdx = i
-					break
-				}
+			if len(p) == 10 && strings.Count(p, "-") == 2 && p[0] >= '0' && p[0] <= '9' {
+				dateIdx = i
+				break
 			}
 		}
-
-		if dateIdx == -1 {
-			// Fallback: maybe format is different (e.g. older Android).
-			// Let's just assume last parts are name.
+		if dateIdx == -1 || dateIdx+2 >= len(parts) {
 			continue
 		}
-
-		// Assuming: ... size date time name
-		// size is dateIdx - 1
-		// time is dateIdx + 1
-		// name starts at dateIdx + 2
-
-		if dateIdx+2 >= len(parts) {
-			continue
-		}
-
 		sizeStr := parts[dateIdx-1]
-		size, _ := strconv.ParseInt(sizeStr, 10, 64)
-
+		size, err := strconv.ParseInt(sizeStr, 10, 64)
+		if err != nil {
+			continue
+		}
 		timeStr := parts[dateIdx] + " " + parts[dateIdx+1]
-
 		nameParts := parts[dateIdx+2:]
 		name := strings.Join(nameParts, " ")
-
 		if name == "." || name == ".." {
 			continue
 		}
-
-		// Full path
 		fullPath := path.Join(currentDir, name)
-
-		files = append(files, File{
-			Path:      fullPath,
-			Size:      size,
-			Timestamp: timeStr,
-			IsDir:     isDir,
-		})
+		files = append(files, File{Path: fullPath, Size: size, Timestamp: timeStr, IsDir: isDir})
 	}
 
 	return files, nil

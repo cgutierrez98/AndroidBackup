@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"syscall"
 )
 
 // Client wraps the adb executable commands
@@ -32,7 +31,8 @@ type Device struct {
 // RunCommand executes a raw adb command and returns output
 func (c *Client) RunCommand(args ...string) (string, error) {
 	cmd := exec.Command(c.Path, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	// setHideWindow is platform-specific helper defined in separate files
+	setHideWindow(cmd)
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &out

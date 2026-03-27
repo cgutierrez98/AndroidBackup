@@ -13,6 +13,7 @@ type Entry struct {
 	LocalPath    string `json:"local_path"`    // Relative path in backup folder
 	Size         int64  `json:"size"`
 	Timestamp    string `json:"timestamp"`
+	Hash         string `json:"hash,omitempty"` // xxHash of local file for integrity verification
 }
 
 // Manifest holds all backup entries
@@ -29,7 +30,7 @@ func New() *Manifest {
 }
 
 // Add appends an entry to the manifest (thread-safe)
-func (m *Manifest) Add(original, local string, size int64, timestamp string) {
+func (m *Manifest) Add(original, local string, size int64, timestamp, hash string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Entries = append(m.Entries, Entry{
@@ -37,7 +38,22 @@ func (m *Manifest) Add(original, local string, size int64, timestamp string) {
 		LocalPath:    local,
 		Size:         size,
 		Timestamp:    timestamp,
+		Hash:         hash,
 	})
+}
+
+// HashSet returns the set of all non-empty hashes in the manifest.
+// Used to seed the dedup registry with previously verified transfers.
+func (m *Manifest) HashSet() map[string]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	set := make(map[string]bool, len(m.Entries))
+	for _, e := range m.Entries {
+		if e.Hash != "" {
+			set[e.Hash] = true
+		}
+	}
+	return set
 }
 
 // Save writes the manifest to a JSON file
@@ -50,7 +66,7 @@ func (m *Manifest) Save(backupRoot string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 // Load reads a manifest from a backup folder

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -12,6 +16,8 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"github.com/cespare/xxhash/v2"
 
 	"AndroidSafeLocal/internal/adb"
 	"AndroidSafeLocal/internal/backup"
@@ -117,13 +123,16 @@ func main() {
 	// 3. LOGS
 	logArea := widget.NewMultiLineEntry()
 	logArea.SetMinRowsVisible(8)
+	logArea.Disable() // Read-only: prevents accidental edits by the user
 
-	// Logger helper
+	// Logger helper (mutex-protected: logArea.Text is read-written from background goroutines)
+	var logMu sync.Mutex
 	logPrint := func(msg string) {
+		logMu.Lock()
+		defer logMu.Unlock()
 		timestamp := time.Now().Format("15:04:05")
 		logArea.SetText(logArea.Text + fmt.Sprintf("[%s] %s\n", timestamp, msg))
 		logArea.Refresh() // Force redraw
-		logArea.CursorRow = len(logArea.Text)
 	}
 
 	// 4. Progress
@@ -131,140 +140,252 @@ func main() {
 	progressBar.Hide()
 
 	// -- STATE --
+	// stateMu guards client and files, which are written/read from multiple goroutines.
+	var stateMu sync.RWMutex
 	var client *adb.Client
 	var files []device_pkg.File
 
 	// -- ACTIONS --
 	var scanBtn *widget.Button
 
+	// setActionsEnabled enables or disables all action buttons atomically to prevent
+	// concurrent overlapping operations.
+	var backupBtn, galleryBtn, restoreBtn *widget.Button
+	setActionsEnabled := func(enabled bool) {
+		for _, btn := range []*widget.Button{scanBtn, backupBtn, galleryBtn, restoreBtn} {
+			if btn == nil {
+				continue
+			}
+			if enabled {
+				btn.Enable()
+			} else {
+				btn.Disable()
+			}
+		}
+	}
+
 	backgroundOp := func(action func()) {
+		setActionsEnabled(false)
 		go func() {
+			defer setActionsEnabled(true)
 			action()
 		}()
 	}
 
 	// Scan Action
 	scanBtn = widget.NewButtonWithIcon(t.ScanFiles, theme.SearchIcon(), func() {
-		if client == nil {
-			dialog.ShowError(fmt.Errorf("ADB not initialized"), w)
+		stateMu.RLock()
+		c := client
+		stateMu.RUnlock()
+		if c == nil {
+			dialog.ShowError(errors.New("ADB not initialized"), w)
 			return
 		}
 		logPrint(t.Scanning + " " + sourceEntry.Text + "...")
-		scanBtn.Disable()
 		progressBar.Show() // Indeterminate or just show it
 
 		backgroundOp(func() {
-			defer scanBtn.Enable()
-			walker := device_pkg.NewWalker(client)
-			var err error
-			files, err = walker.Walk(sourceEntry.Text)
+			walker := device_pkg.NewWalker(c)
+			result, err := walker.Walk(sourceEntry.Text)
 			if err != nil {
 				logPrint(t.ScanFailed + ": " + err.Error())
 				progressBar.Hide()
 				return
 			}
-			logPrint(fmt.Sprintf(t.FoundFiles, len(files)))
+			stateMu.Lock()
+			files = result
+			stateMu.Unlock()
+			logPrint(fmt.Sprintf(t.FoundFiles, len(result)))
 			progressBar.Hide()
 		})
 	})
 
 	// Backup Action
-	backupBtn := widget.NewButtonWithIcon(t.StartBackup, theme.DownloadIcon(), func() {
-		if len(files) == 0 {
-			dialog.ShowInformation("Info", "Please scan for files first.", w)
+	backupBtn = widget.NewButtonWithIcon(t.StartBackup, theme.DownloadIcon(), func() {
+		stateMu.RLock()
+		localFiles := append([]device_pkg.File(nil), files...)
+		stateMu.RUnlock()
+
+		if len(localFiles) == 0 {
+			dialog.ShowInformation(t.InfoTitle, t.ScanFirst, w)
 			return
 		}
-		logPrint(t.StartingBackup)
-		progressBar.SetValue(0)
-		progressBar.Show()
-		progressBar.Max = float64(len(files))
 
-		backgroundOp(func() {
-			// Initialize Registry
-			registry := dedup.NewRegistry()
-			logPrint(t.LoadingIndex)
-			if err := registry.Load(destEntry.Text); err != nil {
-				logPrint(t.RegistryWarning + ": " + err.Error())
+		// Count eligible files upfront: avoids mutating progressBar.Max from a goroutine
+		includeDocs := includeDocsCheck.Checked
+		eligibleCount := 0
+		for _, f := range localFiles {
+			if !f.IsDir && shouldBackupFile(f.Path, includeDocs) {
+				eligibleCount++
 			}
+		}
 
-			agent := &backup.TransferAgent{Client: client}
-			pool := backup.NewPool(5, agent, registry)
-			pool.Start()
+		destRoot := destEntry.Text
 
-			fileSorter := sorter.NewSorter()
-			destRoot := destEntry.Text
-			failures := 0
-			success := 0
+		stateMu.RLock()
+		c := client
+		stateMu.RUnlock()
 
-			// Initialize Manifest
-			backupManifest := manifest.New()
+		// startBackup contains the actual backup logic. resume=true if the user
+		// chose to continue a previously interrupted session.
+		startBackup := func(resume bool) {
+			logPrint(t.StartingBackup)
+			progressBar.SetValue(0)
+			progressBar.Max = float64(eligibleCount)
+			progressBar.Show()
 
-			// Feeder
-			go func() {
-				includeDocs := includeDocsCheck.Checked
-				for _, f := range files {
-					if f.IsDir {
-						progressBar.Max = progressBar.Max - 1
-						continue
+			backgroundOp(func() {
+				// Load resume state if requested
+				var completedPaths map[string]bool
+				if resume {
+					if state, err := backup.LoadState(destRoot); err == nil {
+						completedPaths = state.CompletedPaths
+						logPrint(t.Resuming)
 					}
-
-					// Filter by file type
-					if !shouldBackupFile(f.Path, includeDocs) {
-						progressBar.Max = progressBar.Max - 1
-						continue
-					}
-
-					relDest := fileSorter.GetDestination(f)
-					fullDest := filepath.Join(destRoot, relDest)
-					pool.AddJob(backup.Job{
-						SourcePath: f.Path,
-						DestPath:   fullDest,
-						Size:       f.Size,
-						Timestamp:  f.Timestamp,
-					})
-				}
-				pool.Close()
-			}()
-
-			// Collector
-			for res := range pool.Results() {
-				if res.Error != nil {
-					logPrint(fmt.Sprintf("%s: %s (%v)", t.Fail, filepath.Base(res.Job.SourcePath), res.Error))
-					failures++
-				} else if res.Skipped {
-					logPrint(fmt.Sprintf("%s: %s", t.Skip, filepath.Base(res.Job.SourcePath)))
-					success++
 				} else {
-					// Add to manifest on success
-					relPath, _ := filepath.Rel(destRoot, res.Job.DestPath)
-					backupManifest.Add(res.Job.SourcePath, relPath, res.Job.Size, res.Job.Timestamp)
-					success++
+					_ = backup.ClearState(destRoot)
 				}
-				progressBar.SetValue(progressBar.Value + 1)
-			}
+				if completedPaths == nil {
+					completedPaths = make(map[string]bool)
+				}
+				runState := backup.NewBackupState()
 
-			logPrint(fmt.Sprintf(t.Finished, success, failures))
+				// Initialize Registry
+				registry := dedup.NewRegistry()
+				logPrint(t.LoadingIndex)
+				// Load existing manifest hashes first (faster than filesystem walk for large backups)
+				if existingManifest, err := manifest.Load(destRoot); err == nil {
+					registry.LoadHashes(existingManifest.HashSet())
+				}
+				if err := registry.Load(destRoot); err != nil {
+					logPrint(t.RegistryWarning + ": " + err.Error())
+				}
 
-			// Save manifest
-			if err := backupManifest.Save(destRoot); err != nil {
-				logPrint(t.ManifestSaveFail + ": " + err.Error())
-			} else {
-				logPrint(t.ManifestSaved)
-			}
-			progressBar.Hide()
-		})
+				agent := &backup.TransferAgent{Client: c}
+				pool := backup.NewPool(5, agent, registry)
+				pool.Start()
+
+				fileSorter := sorter.NewSorter()
+				failures := 0
+				success := 0
+
+				// Initialize Manifest
+				backupManifest := manifest.New()
+
+				// Feeder
+				go func() {
+					for _, f := range localFiles {
+						if f.IsDir {
+							continue
+						}
+						if !shouldBackupFile(f.Path, includeDocs) {
+							continue
+						}
+						// Skip paths already completed in the previous session
+						if completedPaths[f.Path] {
+							continue
+						}
+						var relDest string
+						if includeDocs && sorter.IsDocument(f.Path) {
+							relDest = fileSorter.GetDocumentDestination(f, sourceEntry.Text)
+						} else {
+							relDest = fileSorter.GetDestination(f)
+						}
+						fullDest := filepath.Join(destRoot, relDest)
+						pool.AddJob(backup.Job{
+							SourcePath: f.Path,
+							DestPath:   fullDest,
+							Size:       f.Size,
+							Timestamp:  f.Timestamp,
+						})
+					}
+					pool.Close()
+				}()
+
+				// Collector
+				processed := 0
+				for res := range pool.Results() {
+					if res.Error != nil {
+						logPrint(fmt.Sprintf("%s: %s (%v)", t.Fail, filepath.Base(res.Job.SourcePath), res.Error))
+						failures++
+					} else if res.Skipped {
+						logPrint(fmt.Sprintf("%s: %s", t.Skip, filepath.Base(res.Job.SourcePath)))
+						success++
+					} else {
+						// P4: Re-sort using EXIF DateTimeOriginal when available
+						actualDest := res.Job.DestPath
+						if !sorter.IsDocument(res.Job.SourcePath) {
+							devFile := device_pkg.File{Path: res.Job.SourcePath, Timestamp: res.Job.Timestamp}
+							exifRel := fileSorter.GetDestinationWithEXIF(devFile, res.Job.DestPath)
+							exifFull := filepath.Join(destRoot, exifRel)
+							if exifFull != res.Job.DestPath {
+								if mkErr := os.MkdirAll(filepath.Dir(exifFull), 0755); mkErr == nil {
+									if renErr := os.Rename(res.Job.DestPath, exifFull); renErr == nil {
+										actualDest = exifFull
+									}
+								}
+							}
+						}
+						// Compute xxHash of the local file for integrity tracking
+						hash, _ := xxhashFile(actualDest)
+						if hash != "" {
+							registry.AddByHash(hash)
+						}
+						// Record completion in state file (persist every 10 files)
+						runState.CompletedPaths[res.Job.SourcePath] = true
+						if len(runState.CompletedPaths)%10 == 0 {
+							_ = runState.Save(destRoot)
+						}
+						// Add to manifest on success
+						relPath, _ := filepath.Rel(destRoot, actualDest)
+						backupManifest.Add(res.Job.SourcePath, relPath, res.Job.Size, res.Job.Timestamp, hash)
+						success++
+					}
+					processed++
+					progressBar.SetValue(float64(processed))
+				}
+
+				logPrint(fmt.Sprintf(t.Finished, success, failures))
+
+				// Save manifest
+				if err := backupManifest.Save(destRoot); err != nil {
+					logPrint(t.ManifestSaveFail + ": " + err.Error())
+				} else {
+					logPrint(t.ManifestSaved)
+				}
+
+				// Clear resume state on successful completion
+				_ = backup.ClearState(destRoot)
+				progressBar.Hide()
+			})
+		}
+
+		// If an interrupted session exists, ask the user whether to resume it
+		if backup.StateExists(destRoot) {
+			dialog.NewCustomConfirm(
+				t.ResumeTitle, t.ResumeYes, t.ResumeNo,
+				widget.NewLabel(t.ResumeMsg),
+				func(resume bool) { startBackup(resume) },
+				w,
+			).Show()
+		} else {
+			startBackup(false)
+		}
 	})
 
 	// Gallery Action
-	galleryBtn := widget.NewButtonWithIcon(t.GenerateGallery, theme.MediaPhotoIcon(), func() {
+	galleryBtn = widget.NewButtonWithIcon(t.GenerateGallery, theme.MediaPhotoIcon(), func() {
 		dest := destEntry.Text
 		logPrint(t.GeneratingGallery)
 		progressBar.SetValue(0)
+		progressBar.Max = 1 // will be updated by callback on first tick
 		progressBar.Show()
 
 		backgroundOp(func() {
 			gen := gallery.NewGenerator()
 			count, err := gen.Generate(dest, func(current, total int) {
+				// Set Max once (total is stable after first call) then update value.
+				// Both writes happen on this single goroutine, so no concurrent race.
 				progressBar.Max = float64(total)
 				progressBar.SetValue(float64(current))
 			})
@@ -286,9 +407,12 @@ func main() {
 	})
 
 	// Restore Action
-	restoreBtn := widget.NewButtonWithIcon(t.Restore, theme.UploadIcon(), func() {
-		if client == nil {
-			dialog.ShowError(fmt.Errorf("ADB not initialized"), w)
+	restoreBtn = widget.NewButtonWithIcon(t.Restore, theme.UploadIcon(), func() {
+		stateMu.RLock()
+		c := client
+		stateMu.RUnlock()
+		if c == nil {
+			dialog.ShowError(errors.New("ADB not initialized"), w)
 			return
 		}
 		localPath := destEntry.Text
@@ -310,7 +434,7 @@ func main() {
 					logPrint(t.RestoringTo + " " + remotePath + "...")
 					progressBar.Show()
 					backgroundOp(func() {
-						err := client.Push(localPath, remotePath)
+						err := c.Push(localPath, remotePath)
 						if err != nil {
 							logPrint(t.RestoreFailed + ": " + err.Error())
 						} else {
@@ -340,7 +464,7 @@ func main() {
 
 				backgroundOp(func() {
 					// Use parallel restore pool with more workers for small files
-					restorePool := backup.NewRestorePool(15, client)
+					restorePool := backup.NewRestorePool(15, c)
 					restorePool.Start()
 
 					total := len(backupManifest.Entries)
@@ -426,14 +550,16 @@ func main() {
 
 	// -- INITIALIZATION --
 	go func() {
-		var err error
-		client, err = adb.NewClient()
+		newClient, err := adb.NewClient()
 		if err != nil {
 			statusLabel.SetText(t.ADBNotFound)
 			logPrint(t.ADBError + ": " + err.Error())
 			return
 		}
-		devices, err := client.Devices()
+		stateMu.Lock()
+		client = newClient
+		stateMu.Unlock()
+		devices, err := newClient.Devices()
 		if err != nil {
 			statusLabel.SetText(t.ADBError + ": " + err.Error())
 			return
@@ -450,12 +576,32 @@ func main() {
 
 	// Cleanup ADB server when window closes
 	w.SetOnClosed(func() {
-		if client != nil {
-			client.KillServer()
+		stateMu.RLock()
+		closingClient := client
+		stateMu.RUnlock()
+		if closingClient != nil {
+			if err := closingClient.KillServer(); err != nil {
+				logPrint(t.ADBError + ": " + err.Error())
+			}
 		}
 	})
 
 	w.ShowAndRun()
+}
+
+// xxhashFile computes the xxHash (hex string) of a local file.
+// Returns "" on any error so callers can treat it as "hash unknown".
+func xxhashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := xxhash.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum64()), nil
 }
 
 // Media file extensions (always backed up)
@@ -467,26 +613,15 @@ var mediaExtensions = map[string]bool{
 	".mp3": true, ".wav": true, ".flac": true, ".aac": true, ".ogg": true, ".m4a": true,
 }
 
-// Document file extensions (optional)
-var documentExtensions = map[string]bool{
-	".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
-	".ppt": true, ".pptx": true, ".txt": true, ".rtf": true, ".odt": true,
-	".ods": true, ".odp": true, ".csv": true,
-}
-
-// shouldBackupFile determines if a file should be included in the backup
+// shouldBackupFile determines if a file should be included in the backup.
+// Media files are always included; documents only when includeDocs is true.
 func shouldBackupFile(filePath string, includeDocs bool) bool {
 	ext := strings.ToLower(filepath.Ext(filePath))
-
-	// Always include media files
 	if mediaExtensions[ext] {
 		return true
 	}
-
-	// Include documents only if checkbox is checked
-	if includeDocs && documentExtensions[ext] {
+	if includeDocs && sorter.IsDocument(filePath) {
 		return true
 	}
-
 	return false
 }

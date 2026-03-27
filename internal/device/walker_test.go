@@ -54,3 +54,30 @@ total 8
 		}
 	}
 }
+
+func TestParseLsR_EdgeCases(t *testing.T) {
+	// Variants: missing owner/group, weird spacing, malformed size
+	output := `/sdcard/Test:
+total 8
+-rw-r--r-- 1  2048 2024-07-01 12:00 simple.jpg
+-rw-r--r-- 1 root sdcard_rw notanumber 2024-07-01 12:01 badsize.jpg
+-rw-r--r-- 1 root sdcard_rw 1024 2024-07-01 12:02 name with spaces.png
+`
+
+	files, err := parseLsR(output, "/sdcard/Test")
+	if err != nil {
+		t.Fatalf("parseLsR failed: %v", err)
+	}
+
+	if len(files) != 2 {
+		t.Fatalf("expected 2 parsed files (skip bad size), got %d", len(files))
+	}
+
+	// Verify names and sizes
+	if files[0].Path != "/sdcard/Test/simple.jpg" || files[0].Size != 2048 {
+		t.Errorf("unexpected first file: %+v", files[0])
+	}
+	if files[1].Path != "/sdcard/Test/name with spaces.png" || files[1].Size != 1024 {
+		t.Errorf("unexpected second file: %+v", files[1])
+	}
+}

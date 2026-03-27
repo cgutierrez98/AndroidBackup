@@ -75,6 +75,17 @@ type Strings struct {
 	Fail string
 	Skip string
 	OK   string
+
+	// Validation
+	InfoTitle  string
+	ScanFirst  string
+
+	// Resume backup
+	ResumeTitle   string
+	ResumeMsg     string
+	ResumeYes     string
+	ResumeNo      string
+	Resuming      string
 }
 
 var currentLang Language = English
@@ -138,6 +149,15 @@ var translations = map[Language]Strings{
 		Fail: "FAIL",
 		Skip: "SKIP",
 		OK:   "OK",
+
+		InfoTitle: "Info",
+		ScanFirst: "Please scan for files first.",
+
+		ResumeTitle: "Resume Backup",
+		ResumeMsg:   "A previous backup was interrupted.\nResume from where it stopped?",
+		ResumeYes:   "Resume",
+		ResumeNo:    "Start Fresh",
+		Resuming:    "Resuming previous backup...",
 	},
 	Spanish: {
 		AppTitle:        "AndroidSafeLocal",
@@ -197,6 +217,15 @@ var translations = map[Language]Strings{
 		Fail: "FALLO",
 		Skip: "OMITIDO",
 		OK:   "OK",
+
+		InfoTitle: "Info",
+		ScanFirst: "Por favor, escanea los archivos primero.",
+
+		ResumeTitle: "Reanudar Backup",
+		ResumeMsg:   "El backup anterior fue interrumpido.\n¿Reanudar desde donde se detuvo?",
+		ResumeYes:   "Reanudar",
+		ResumeNo:    "Empezar de Nuevo",
+		Resuming:    "Reanudando backup anterior...",
 	},
 }
 

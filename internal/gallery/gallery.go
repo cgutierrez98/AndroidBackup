@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"log"
 
 	"github.com/disintegration/imaging"
 )
@@ -116,9 +117,13 @@ func (g *Generator) Generate(rootPath string, progressCallback func(current, tot
 					if err == nil {
 						// Resize to 300x300 fill
 						thumb := imaging.Fill(img, 300, 300, imaging.Center, imaging.Lanczos)
-						imaging.Save(thumb, thumbPath)
+						if err := imaging.Save(thumb, thumbPath); err != nil {
+							log.Printf("gallery: imaging.Save failed for %s: %v", thumbPath, err)
+							createPlaceholder(thumbPath, "ERR")
+						}
 					} else {
 						// Failed to open image
+						log.Printf("gallery: imaging.Open failed for %s: %v", srcPath, err)
 						createPlaceholder(thumbPath, "ERR")
 					}
 				}
@@ -151,9 +156,15 @@ func createPlaceholder(path string, label string) {
 	img := image.NewRGBA(rect)
 	// (Writing text to image in pure go is verbose, let's just make it gray)
 	// Just save it.
-	f, _ := os.Create(path)
+	f, err := os.Create(path)
+	if err != nil {
+		log.Printf("gallery: createPlaceholder: failed to create %s: %v", path, err)
+		return
+	}
 	defer f.Close()
-	jpeg.Encode(f, img, nil)
+	if err := jpeg.Encode(f, img, nil); err != nil {
+		log.Printf("gallery: jpeg.Encode failed for %s: %v", path, err)
+	}
 }
 
 const htmlTemplate = `
