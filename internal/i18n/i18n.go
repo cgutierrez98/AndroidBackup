@@ -86,6 +86,47 @@ type Strings struct {
 	ResumeYes     string
 	ResumeNo      string
 	Resuming      string
+
+	// Tabs
+	TabBackup  string
+	TabGallery string
+	TabRestore string
+
+	// Status bar
+	StatusReady    string
+	StatusWorkers  string
+	StatusSpeed    string
+	StatusFreeGB   string
+	StatusFreeErr  string
+
+	// Pre-backup stats (E1)
+	StatsNew     string
+	StatsSkipped string
+	StatsMB      string
+
+	// Workers slider (F1)
+	WorkersLabel string
+
+	// Notification (F3)
+	NotifyTitle   string
+	NotifyBackup  string
+	NotifyGallery string
+
+	// Profiles (F4)
+	ProfileLabel  string
+	ProfileSave   string
+	ProfileSaved  string
+	ProfileLoad   string
+	ProfileNew    string
+
+	// Gallery open in browser (F5)
+	OpenInBrowser string
+
+	// Exclusions (E2)
+	ExcludeLabel        string
+	ExcludePresets      string
+	ExcludeCustom       string
+	ExcludePlaceholder  string
 }
 
 var currentLang Language = English
@@ -158,6 +199,39 @@ var translations = map[Language]Strings{
 		ResumeYes:   "Resume",
 		ResumeNo:    "Start Fresh",
 		Resuming:    "Resuming previous backup...",
+
+		TabBackup:  "Backup",
+		TabGallery: "Gallery",
+		TabRestore: "Restore",
+
+		StatusReady:   "Ready",
+		StatusWorkers: "Workers: %d",
+		StatusSpeed:   "%.1f MB/s",
+		StatusFreeGB:  "Free: %.1f GB",
+		StatusFreeErr: "Free: —",
+
+		StatsNew:     "New: %d",
+		StatsSkipped: "Already backed up: %d",
+		StatsMB:      "Pending: %.1f MB",
+
+		WorkersLabel: "Concurrent Workers",
+
+		NotifyTitle:   "AndroidSafeLocal",
+		NotifyBackup:  "Backup complete. %d files transferred.",
+		NotifyGallery: "Gallery generated. %d items.",
+
+		ProfileLabel: "Profile",
+		ProfileSave:  "Save Profile",
+		ProfileSaved: "Profile saved.",
+		ProfileLoad:  "Load Profile",
+		ProfileNew:   "New Profile...",
+
+		OpenInBrowser: "Open in browser when done",
+
+		ExcludeLabel:       "Exclusions",
+		ExcludePresets:     "Common presets",
+		ExcludeCustom:      "Custom patterns:",
+		ExcludePlaceholder: ".tmp, vacation/",
 	},
 	Spanish: {
 		AppTitle:        "AndroidSafeLocal",
@@ -226,6 +300,39 @@ var translations = map[Language]Strings{
 		ResumeYes:   "Reanudar",
 		ResumeNo:    "Empezar de Nuevo",
 		Resuming:    "Reanudando backup anterior...",
+
+		TabBackup:  "Backup",
+		TabGallery: "Galería",
+		TabRestore: "Restaurar",
+
+		StatusReady:   "Listo",
+		StatusWorkers: "Workers: %d",
+		StatusSpeed:   "%.1f MB/s",
+		StatusFreeGB:  "Libre: %.1f GB",
+		StatusFreeErr: "Libre: —",
+
+		StatsNew:     "Nuevos: %d",
+		StatsSkipped: "Ya respaldados: %d",
+		StatsMB:      "Pendiente: %.1f MB",
+
+		WorkersLabel: "Workers concurrentes",
+
+		NotifyTitle:   "AndroidSafeLocal",
+		NotifyBackup:  "Backup completado. %d archivos transferidos.",
+		NotifyGallery: "Galería generada. %d elementos.",
+
+		ProfileLabel: "Perfil",
+		ProfileSave:  "Guardar Perfil",
+		ProfileSaved: "Perfil guardado.",
+		ProfileLoad:  "Cargar Perfil",
+		ProfileNew:   "Nuevo perfil...",
+
+		OpenInBrowser: "Abrir en navegador al terminar",
+
+		ExcludeLabel:       "Exclusiones",
+		ExcludePresets:     "Presets comunes",
+		ExcludeCustom:      "Patrones personalizados:",
+		ExcludePlaceholder: ".tmp, vacaciones/",
 	},
 }
 
