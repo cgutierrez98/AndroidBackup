@@ -127,6 +127,32 @@ type Strings struct {
 	ExcludePresets      string
 	ExcludeCustom       string
 	ExcludePlaceholder  string
+
+	// Dry-run preview (D1)
+	DryRun       string
+	DryRunTitle  string
+	DryRunHeader string
+	DryRunEmpty  string
+
+	// ETA (E3)
+	StatusETA     string
+	StatusETACalc string
+
+	// Verification (V1)
+	VerifyFiles string
+	VerifyOK    string
+	VerifyFail  string
+
+	// Post-op quick actions (N2)
+	OpenFolder  string
+	OpenGallery string
+
+	// Profile export/import (P2)
+	ProfileExport     string
+	ProfileImport     string
+	ProfileExportDone string
+	ProfileImportDone string
+	ProfileImportErr  string
 }
 
 var currentLang Language = English
@@ -230,8 +256,29 @@ var translations = map[Language]Strings{
 
 		ExcludeLabel:       "Exclusions",
 		ExcludePresets:     "Common presets",
-		ExcludeCustom:      "Custom patterns:",
-		ExcludePlaceholder: ".tmp, vacation/",
+		ExcludeCustom:      "Custom patterns (substring or *.glob):",
+		ExcludePlaceholder: "*.tmp, /vacation/",
+
+		DryRun:       "Preview",
+		DryRunTitle:  "Backup Preview",
+		DryRunHeader: "To transfer: %d files (%.1f MB)  ·  Already backed up: %d",
+		DryRunEmpty:  "Nothing new to back up.",
+
+		StatusETA:     "ETA %s",
+		StatusETACalc: "ETA …",
+
+		VerifyFiles: "Verify transferred files (slower)",
+		VerifyOK:    "✓ verified: %s",
+		VerifyFail:  "⚠ verify FAILED: %s",
+
+		OpenFolder:  "Open Folder",
+		OpenGallery: "Open Gallery",
+
+		ProfileExport:     "Export…",
+		ProfileImport:     "Import…",
+		ProfileExportDone: "Profiles exported: %s",
+		ProfileImportDone: "%d profile(s) imported.",
+		ProfileImportErr:  "Import error: %s",
 	},
 	Spanish: {
 		AppTitle:        "AndroidSafeLocal",
@@ -331,8 +378,29 @@ var translations = map[Language]Strings{
 
 		ExcludeLabel:       "Exclusiones",
 		ExcludePresets:     "Presets comunes",
-		ExcludeCustom:      "Patrones personalizados:",
-		ExcludePlaceholder: ".tmp, vacaciones/",
+		ExcludeCustom:      "Patrones personalizados (subcadena o *.glob):",
+		ExcludePlaceholder: "*.tmp, /vacaciones/",
+
+		DryRun:       "Vista Previa",
+		DryRunTitle:  "Vista Previa del Backup",
+		DryRunHeader: "A transferir: %d archivos (%.1f MB)  ·  Ya respaldados: %d",
+		DryRunEmpty:  "Nada nuevo para respaldar.",
+
+		StatusETA:     "ETA %s",
+		StatusETACalc: "ETA …",
+
+		VerifyFiles: "Verificar archivos transferidos (más lento)",
+		VerifyOK:    "✓ verificado: %s",
+		VerifyFail:  "⚠ verificación FALLIDA: %s",
+
+		OpenFolder:  "Abrir Carpeta",
+		OpenGallery: "Abrir Galería",
+
+		ProfileExport:     "Exportar…",
+		ProfileImport:     "Importar…",
+		ProfileExportDone: "Perfiles exportados: %s",
+		ProfileImportDone: "%d perfil(es) importado(s).",
+		ProfileImportErr:  "Error al importar: %s",
 	},
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -49,12 +50,14 @@ func main() {
 	// STATUS BAR (U2)
 	statusBarDevice := widget.NewLabel("●  " + t.CheckingConn)
 	statusBarSpeed := widget.NewLabel("")
+	statusBarETA := widget.NewLabel("")
 	statusBarFree := widget.NewLabel(t.StatusFreeErr)
 	statusBarWorkers := widget.NewLabel("")
 	statusBar := container.NewHBox(
 		statusBarDevice, widget.NewSeparator(),
 		statusBarWorkers, widget.NewSeparator(),
 		statusBarSpeed, widget.NewSeparator(),
+		statusBarETA, widget.NewSeparator(),
 		statusBarFree,
 	)
 
@@ -81,9 +84,9 @@ func main() {
 	progressBar.Hide()
 
 	// BUTTONS (declared early for setActionsEnabled)
-	var scanBtn, backupBtn, galleryBtn, restoreBtn *widget.Button
+	var scanBtn, backupBtn, galleryBtn, restoreBtn, previewBtn *widget.Button
 	setActionsEnabled := func(enabled bool) {
-		for _, btn := range []*widget.Button{scanBtn, backupBtn, galleryBtn, restoreBtn} {
+		for _, btn := range []*widget.Button{scanBtn, backupBtn, galleryBtn, restoreBtn, previewBtn} {
 			if btn == nil {
 				continue
 			}
@@ -150,6 +153,10 @@ func main() {
 	// F5: OPEN IN BROWSER
 	openInBrowserCheck := widget.NewCheck(t.OpenInBrowser, nil)
 	openInBrowserCheck.SetChecked(a.Preferences().BoolWithFallback("openInBrowser", false))
+
+	// V1: VERIFY TRANSFERRED FILES
+	verifyCheck := widget.NewCheck(t.VerifyFiles, nil)
+	verifyCheck.SetChecked(a.Preferences().BoolWithFallback("verifyFiles", false))
 
 	// E2: EXCLUDE PATTERNS — checkboxes + custom entry
 	presetLabels := make([]string, len(excludePresets))
@@ -244,6 +251,58 @@ func main() {
 			}, w)
 		formDialog.Show()
 	})
+	// P2: PROFILE EXPORT / IMPORT
+	exportProfilesBtn := widget.NewButtonWithIcon(t.ProfileExport, theme.UploadIcon(), func() {
+		saveDlg := dialog.NewFileSave(func(uc fyne.URIWriteCloser, err error) {
+			if err != nil || uc == nil {
+				return
+			}
+			defer uc.Close()
+			names := loadProfileNames(a)
+			var exported []exportedProfile
+			for _, name := range names {
+				src, dst, workers, docs, ep, ec := loadProfile(a, name)
+				exported = append(exported, exportedProfile{Name: name, Src: src, Dst: dst, Workers: workers, Docs: docs, ExclPresets: ep, ExclCustom: ec})
+			}
+			b, mErr := json.MarshalIndent(exported, "", "  ")
+			if mErr != nil {
+				logPrint(fmt.Sprintf(t.ProfileImportErr, mErr.Error()))
+				return
+			}
+			if _, wErr := uc.Write(b); wErr != nil {
+				logPrint(fmt.Sprintf(t.ProfileImportErr, wErr.Error()))
+				return
+			}
+			logPrint(fmt.Sprintf(t.ProfileExportDone, uc.URI().Name()))
+		}, w)
+		saveDlg.SetFileName("profiles.json")
+		saveDlg.Show()
+	})
+	importProfilesBtn := widget.NewButtonWithIcon(t.ProfileImport, theme.DownloadIcon(), func() {
+		dialog.ShowFileOpen(func(uc fyne.URIReadCloser, err error) {
+			if err != nil || uc == nil {
+				return
+			}
+			defer uc.Close()
+			data, rErr := io.ReadAll(uc)
+			if rErr != nil {
+				logPrint(fmt.Sprintf(t.ProfileImportErr, rErr.Error()))
+				return
+			}
+			var imported []exportedProfile
+			if uErr := json.Unmarshal(data, &imported); uErr != nil {
+				logPrint(fmt.Sprintf(t.ProfileImportErr, uErr.Error()))
+				return
+			}
+			for _, p := range imported {
+				saveProfile(a, p.Name, p.Src, p.Dst, p.Workers, p.Docs, p.ExclPresets, p.ExclCustom)
+			}
+			allNames := loadProfileNames(a)
+			profileSelect.Options = allNames
+			profileSelect.Refresh()
+			logPrint(fmt.Sprintf(t.ProfileImportDone, len(imported)))
+		}, w)
+	})
 	profileSelect.OnChanged = func(name string) {
 		if name == "" {
 			return
@@ -291,6 +350,17 @@ func main() {
 		statsMBLabel.SetText(fmt.Sprintf(t.StatsMB, float64(pendingBytes)/1e6))
 	}
 
+	// N2: POST-OP ACTION BAR — shown after backup/gallery completes
+	var postOpDestRoot string
+	postOpOpenFolderBtn := widget.NewButtonWithIcon(t.OpenFolder, theme.FolderOpenIcon(), func() {
+		_ = exec.Command("explorer", filepath.FromSlash(postOpDestRoot)).Start()
+	})
+	postOpOpenGalleryBtn := widget.NewButtonWithIcon(t.OpenGallery, theme.MediaPhotoIcon(), func() {
+		_ = exec.Command("cmd", "/c", "start", "", filepath.Join(postOpDestRoot, "index.html")).Start()
+	})
+	postOpRow := container.NewHBox(postOpOpenFolderBtn, postOpOpenGalleryBtn)
+	postOpRow.Hide()
+
 	// SCAN
 	scanBtn = widget.NewButtonWithIcon(t.ScanFiles, theme.SearchIcon(), func() {
 		stateMu.RLock()
@@ -320,6 +390,60 @@ func main() {
 		})
 	})
 
+	// PREVIEW / DRY-RUN (D1)
+	previewBtn = widget.NewButtonWithIcon(t.DryRun, theme.VisibilityIcon(), func() {
+		stateMu.RLock()
+		localFiles := append([]device_pkg.File(nil), files...)
+		stateMu.RUnlock()
+		if len(localFiles) == 0 {
+			dialog.ShowInformation(t.InfoTitle, t.ScanFirst, w)
+			return
+		}
+		includeDocs := includeDocsCheck.Checked
+		excludePatterns := getExcludePatterns()
+		destRoot := destEntry.Text
+		dryReg := dedup.NewRegistry()
+		if existingManifest, err := manifest.Load(destRoot); err == nil {
+			dryReg.LoadHashes(existingManifest.HashSet())
+		}
+		_ = dryReg.Load(destRoot)
+		var toTransfer []string
+		var skipCount int
+		var totalBytes int64
+		for _, f := range localFiles {
+			if f.IsDir || !shouldBackupFile(f.Path, includeDocs) || isExcluded(f.Path, excludePatterns) {
+				continue
+			}
+			devFile := device_pkg.File{Path: f.Path, Size: f.Size}
+			if dryReg.Exists(devFile) {
+				skipCount++
+			} else {
+				toTransfer = append(toTransfer, fmt.Sprintf("%-40s  %.1f MB", filepath.Base(f.Path), float64(f.Size)/1e6))
+				totalBytes += f.Size
+			}
+		}
+		var content string
+		if len(toTransfer) == 0 {
+			content = t.DryRunEmpty
+		} else {
+			shown := toTransfer
+			more := ""
+			if len(shown) > 200 {
+				more = fmt.Sprintf("\n\n... +%d more", len(shown)-200)
+				shown = shown[:200]
+			}
+			content = fmt.Sprintf(t.DryRunHeader, len(toTransfer), float64(totalBytes)/1e6, skipCount) +
+				"\n\n" + strings.Join(shown, "\n") + more
+		}
+		previewArea := widget.NewMultiLineEntry()
+		previewArea.SetText(content)
+		previewArea.Disable()
+		previewArea.SetMinRowsVisible(15)
+		d := dialog.NewCustom(t.DryRunTitle, t.Cancel, container.NewVScroll(previewArea), w)
+		d.Resize(fyne.NewSize(540, 440))
+		d.Show()
+	})
+
 	// BACKUP
 	backupBtn = widget.NewButtonWithIcon(t.StartBackup, theme.DownloadIcon(), func() {
 		stateMu.RLock()
@@ -344,11 +468,19 @@ func main() {
 		stateMu.RUnlock()
 
 		startBackup := func(resume bool) {
+			verifyFiles := verifyCheck.Checked
+			var totalBackupBytes int64
+			for _, f := range localFiles {
+				if !f.IsDir && shouldBackupFile(f.Path, includeDocs) && !isExcluded(f.Path, excludePatterns) {
+					totalBackupBytes += f.Size
+				}
+			}
 			logPrint(t.StartingBackup)
 			progressBar.SetValue(0)
 			progressBar.Max = float64(eligibleCount)
 			progressBar.Show()
 			backgroundOp(func() {
+				startTime := time.Now()
 				var completedPaths map[string]bool
 				if resume {
 					if state, err := backup.LoadState(destRoot); err == nil {
@@ -378,7 +510,7 @@ func main() {
 				fileSorter := sorter.NewSorter()
 				backupManifest := manifest.New()
 
-				// U3: speed tracking
+				// U3: speed tracking + E3: ETA
 				var bytesTransferred atomic.Int64
 				speedTicker := time.NewTicker(time.Second)
 				go func() {
@@ -389,6 +521,14 @@ func main() {
 						lastBytes = current
 						if mbps > 0 {
 							statusBarSpeed.SetText(fmt.Sprintf(t.StatusSpeed, mbps))
+						}
+						elapsed := time.Since(startTime).Seconds()
+						if elapsed > 2 && current > 0 && totalBackupBytes > current {
+							bps := float64(current) / elapsed
+							etaSecs := float64(totalBackupBytes-current) / bps
+							statusBarETA.SetText(fmt.Sprintf(t.StatusETA, formatETA(etaSecs)))
+						} else if current > 0 {
+							statusBarETA.SetText(t.StatusETACalc)
 						}
 					}
 				}()
@@ -441,6 +581,12 @@ func main() {
 						if hash != "" {
 							registry.AddByHash(hash)
 						}
+						// V1: optional integrity verification
+						if verifyFiles && hash != "" {
+							if hash2, _ := xxhashFile(actualDest); hash2 != hash {
+								logPrint(fmt.Sprintf(t.VerifyFail, filepath.Base(actualDest)))
+							}
+						}
 						bytesTransferred.Add(res.Job.Size)
 						runState.CompletedPaths[res.Job.SourcePath] = true
 						if len(runState.CompletedPaths)%10 == 0 {
@@ -455,6 +601,7 @@ func main() {
 				}
 				speedTicker.Stop()
 				statusBarSpeed.SetText("")
+				statusBarETA.SetText("")
 				logPrint(fmt.Sprintf(t.Finished, success, failures))
 				if err := backupManifest.Save(destRoot); err != nil {
 					logPrint(t.ManifestSaveFail + ": " + err.Error())
@@ -463,6 +610,8 @@ func main() {
 				}
 				_ = backup.ClearState(destRoot)
 				progressBar.Hide()
+				postOpDestRoot = destRoot
+				postOpRow.Show()
 				go updateFreeSpace()
 				go updateStats(localFiles, includeDocs)
 				// F3: notification
@@ -476,6 +625,7 @@ func main() {
 				a.Preferences().SetBool("includeDocs", includeDocs)
 				a.Preferences().SetString("excludePresetsSel", strings.Join(excludePresetChecks.Selected, "|"))
 				a.Preferences().SetString("excludeCustom", excludeCustomEntry.Text)
+				a.Preferences().SetBool("verifyFiles", verifyFiles)
 			})
 		}
 
@@ -519,6 +669,9 @@ func main() {
 						// F5: open in browser
 						_ = exec.Command("cmd", "/c", "start", "", filepath.Join(dest, "index.html")).Start()
 					}
+					// N2: post-op action bar
+					postOpDestRoot = dest
+					postOpRow.Show()
 					// F3: notification
 					a.SendNotification(&fyne.Notification{
 						Title:   t.NotifyTitle,
@@ -622,6 +775,7 @@ func main() {
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle(t.FileTypes, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		includeDocsCheck,
+		verifyCheck,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle(t.ExcludeLabel, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewLabelWithStyle(t.ExcludePresets, fyne.TextAlignLeading, fyne.TextStyle{Italic: true}),
@@ -642,6 +796,8 @@ func main() {
 			widget.NewLabelWithStyle(t.ProfileLabel, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			profileSelect,
 			saveProfileBtn,
+			exportProfilesBtn,
+			importProfilesBtn,
 		),
 	))
 
@@ -653,8 +809,9 @@ func main() {
 	backupTab := container.NewVBox(
 		configCard,
 		widget.NewCard(t.Actions, "", container.NewVBox(
-			container.NewGridWithColumns(2, scanBtn, backupBtn),
+			container.NewGridWithColumns(3, scanBtn, previewBtn, backupBtn),
 			statsBox,
+			postOpRow,
 		)),
 		progressBar,
 		widget.NewSeparator(),
@@ -772,15 +929,35 @@ func parseExcludePatterns(raw string) []string {
 	return out
 }
 
-// isExcluded returns true when filePath contains any of the patterns (substring, case-insensitive).
+// isExcluded returns true when filePath matches any pattern.
+// Supports glob patterns against the basename (e.g. *.tmp, thumb*)
+// and plain substring matches against the full path (e.g. /android/data/).
 func isExcluded(filePath string, patterns []string) bool {
-	lower := strings.ToLower(filepath.ToSlash(filePath))
+	lowerPath := strings.ToLower(filepath.ToSlash(filePath))
+	base := strings.ToLower(filepath.Base(filePath))
 	for _, p := range patterns {
-		if strings.Contains(lower, p) {
+		if strings.ContainsAny(p, "*?[") {
+			if ok, _ := filepath.Match(p, base); ok {
+				return true
+			}
+		}
+		if strings.Contains(lowerPath, p) {
 			return true
 		}
 	}
 	return false
+}
+
+// formatETA converts seconds to a human-readable duration string.
+func formatETA(secs float64) string {
+	if secs < 0 {
+		secs = 0
+	}
+	d := time.Duration(int64(secs)) * time.Second
+	if d >= time.Hour {
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
 }
 
 // diskFreeGB returns the free disk space in GB for the volume containing path.
@@ -833,6 +1010,17 @@ func loadProfile(a fyne.App, name string) (src, dst string, workers int, docs bo
 
 // excludePreset defines a human-readable label and the substring pattern it matches.
 type excludePreset struct{ label, pattern string }
+
+// exportedProfile is the JSON-serialisable representation of a saved profile (P2).
+type exportedProfile struct {
+	Name        string `json:"name"`
+	Src         string `json:"src"`
+	Dst         string `json:"dst"`
+	Workers     int    `json:"workers"`
+	Docs        bool   `json:"docs"`
+	ExclPresets string `json:"excl_presets"`
+	ExclCustom  string `json:"excl_custom"`
+}
 
 // excludePresets is the list of common one-click exclusion filters.
 var excludePresets = []excludePreset{
